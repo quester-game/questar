@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10172b">
+  <meta name="description" content="QUESTAR is an offline-friendly fantasy learning adventure for reading and mathematics.">
+  <title>QUESTAR — Learning Adventure</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="script.js" defer></script>
+</head>
+<body>
+  <div class="sky sky-one" aria-hidden="true"></div>
+  <div class="sky sky-two" aria-hidden="true"></div>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#" data-action="home" aria-label="QUESTAR home">
+        <span class="brand-mark" aria-hidden="true">✦</span>
+        <span>QUESTAR</span>
+      </a>
+      <div id="topbar-player" class="topbar-player" aria-live="polite"></div>
+      <nav class="quick-nav" aria-label="Quick navigation">
+        <button class="icon-button" type="button" data-action="nav-dashboard" aria-label="Progress dashboard" title="Progress">◈</button>
+        <button class="icon-button" type="button" data-action="nav-settings" aria-label="Settings" title="Settings">⚙</button>
+      </nav>
+    </header>
+    <main id="app-root" tabindex="-1" aria-live="polite"></main>
+    <footer class="site-footer">
+      <span>✦ Learn bravely, one question at a time.</span>
+      <span>Offline prototype · Progress stays in this browser</span>
+    </footer>
+  </div>
+</body>
+</html>
