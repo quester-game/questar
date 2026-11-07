@@ -19,7 +19,9 @@
         <span>QUESTAR</span>
       </a>
       <div id="topbar-player" class="topbar-player" aria-live="polite"></div>
+      <a class="icon-button account-link" href="account.html" aria-label="Student account" title="Student account">👤</a>
       <nav class="quick-nav" aria-label="Quick navigation">
+        <button class="icon-button sound-toggle" type="button" data-action="toggle-sound" aria-label="Mute sound effects" title="Sound effects">🔊</button>
         <button class="icon-button" type="button" data-action="nav-dashboard" aria-label="Progress dashboard" title="Progress">◈</button>
         <button class="icon-button" type="button" data-action="nav-settings" aria-label="Settings" title="Settings">⚙</button>
       </nav>
@@ -30,5 +32,7 @@
       <span>Offline prototype · Progress stays in this browser</span>
     </footer>
   </div>
+  <script src="supabase-config.js"></script>
+  <script type="module" src="student-session.js"></script>
 </body>
 </html>

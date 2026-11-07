@@ -10,7 +10,21 @@
     streakBonus: 10,
     animations: true,
     reducedMotion: false,
-    largeText: false
+    largeText: false,
+    soundEffects: true,
+    backgroundMusic: true,
+    audioMuted: false,
+    masterVolume: 0.65,
+    effectsVolume: 0.75,
+    musicVolume: 0.3
+  };
+  const AUDIO_TRACKS = {
+    menu: { tempo: 1900, notes: [196, 220, 174.61, 164.81], intervals: [1, 1.25, 1.5], melody: [392, 349.23, 293.66, 329.63] },
+    exploration: { tempo: 2300, notes: [220, 261.63, 196, 174.61], intervals: [1, 1.5, 2], melody: [440, 392, 329.63, 349.23] },
+    quiz: { tempo: 2500, notes: [220, 196, 246.94, 174.61], intervals: [1, 1.25, 1.5], melody: [392, 329.63, 349.23, 293.66] },
+    battle: { tempo: 680, notes: [110, 123.47, 98, 130.81], intervals: [1, 1.5, 2], melody: [220, 246.94, 196, 261.63] },
+    victory: { tempo: 900, notes: [261.63, 293.66, 329.63, 392], intervals: [1, 1.25, 1.5], melody: [523.25, 587.33, 659.25, 783.99] },
+    defeat: { tempo: 2400, notes: [164.81, 146.83, 138.59, 130.81], intervals: [1, 1.2, 1.5], melody: [329.63, 293.66, 261.63, 246.94] }
   };
   const STORIES = [
     {
@@ -95,6 +109,7 @@
 
   const root = document.getElementById("app-root");
   const topbarPlayer = document.getElementById("topbar-player");
+  const soundToggle = document.querySelector(".sound-toggle");
   const state = loadDatabase();
   let game = null;
   let activeTimer = null;
@@ -102,6 +117,15 @@
   let groupResult = "";
   let questChoice = "";
   let toastNode;
+  let audioContext = null;
+  let masterGain = null;
+  let effectsGain = null;
+  let musicGain = null;
+  let musicTrackGain = null;
+  let musicTimer = null;
+  let musicBeat = 0;
+  let activeMusicTrack = "";
+  const recentSounds = new Map();
 
   if (state.currentId && state.profiles[state.currentId]) {
     game = state.profiles[state.currentId].activeGame || null;
@@ -136,7 +160,17 @@
       ...saved,
       profile: { ...fresh.profile, ...saved.profile },
       coins: Number.isFinite(saved.coins) && saved.coins >= 0 ? Math.floor(saved.coins) : 0,
-      settings: { ...DEFAULT_SETTINGS, ...(saved.settings || {}), rewards: { ...DEFAULT_SETTINGS.rewards, ...((saved.settings || {}).rewards || {}) } },
+      settings: {
+        ...DEFAULT_SETTINGS,
+        ...(saved.settings || {}),
+        rewards: { ...DEFAULT_SETTINGS.rewards, ...((saved.settings || {}).rewards || {}) },
+        masterVolume: clampVolume(saved.settings?.masterVolume, DEFAULT_SETTINGS.masterVolume),
+        effectsVolume: clampVolume(saved.settings?.effectsVolume, DEFAULT_SETTINGS.effectsVolume),
+        musicVolume: clampVolume(saved.settings?.musicVolume, DEFAULT_SETTINGS.musicVolume),
+        soundEffects: typeof saved.settings?.soundEffects === "boolean" ? saved.settings.soundEffects : DEFAULT_SETTINGS.soundEffects,
+        backgroundMusic: typeof saved.settings?.backgroundMusic === "boolean" ? saved.settings.backgroundMusic : DEFAULT_SETTINGS.backgroundMusic,
+        audioMuted: typeof saved.settings?.audioMuted === "boolean" ? saved.settings.audioMuted : DEFAULT_SETTINGS.audioMuted
+      },
       completedStories: validArray(saved.completedStories),
       completedMath: validArray(saved.completedMath),
       completedQuests: validArray(saved.completedQuests),
@@ -195,6 +229,185 @@
     return state.currentId ? state.profiles[state.currentId] : null;
   }
 
+  function clampVolume(value, fallback) {
+    return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : fallback;
+  }
+
+  function audioSettings() {
+    return currentProfile()?.settings || DEFAULT_SETTINGS;
+  }
+
+  function ensureAudio() {
+    if (audioContext) return true;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return false;
+    audioContext = new AudioContextClass();
+    masterGain = audioContext.createGain();
+    effectsGain = audioContext.createGain();
+    musicGain = audioContext.createGain();
+    effectsGain.connect(masterGain);
+    musicGain.connect(masterGain);
+    masterGain.connect(audioContext.destination);
+    applyAudioVolumes();
+    return true;
+  }
+
+  function applyAudioVolumes() {
+    if (!audioContext) return;
+    const settings = audioSettings();
+    const now = audioContext.currentTime;
+    const ramp = (node, value) => {
+      node.gain.cancelScheduledValues(now);
+      node.gain.setValueAtTime(node.gain.value, now);
+      node.gain.linearRampToValueAtTime(value, now + 0.12);
+    };
+    ramp(masterGain, settings.audioMuted ? 0 : settings.masterVolume);
+    ramp(effectsGain, settings.soundEffects ? settings.effectsVolume : 0);
+    ramp(musicGain, settings.backgroundMusic ? settings.musicVolume : 0);
+  }
+
+  function unlockAudio() {
+    if (!ensureAudio()) return;
+    if (audioContext.state === "suspended") {
+      audioContext.resume()
+        .then(() => {
+          applyAudioVolumes();
+          syncMusic(screen);
+        })
+        .catch((error) => console.warn("QUESTAR audio could not start.", error));
+    }
+    applyAudioVolumes();
+    syncMusic(screen);
+  }
+
+  function playTone(frequency, duration, volume, waveform, destination, detune = 0) {
+    if (!audioContext || !destination) return;
+    const now = audioContext.currentTime;
+    const oscillator = audioContext.createOscillator();
+    const envelope = audioContext.createGain();
+    oscillator.type = waveform;
+    oscillator.frequency.setValueAtTime(frequency, now);
+    oscillator.detune.setValueAtTime(detune, now);
+    envelope.gain.setValueAtTime(0.0001, now);
+    envelope.gain.linearRampToValueAtTime(Math.max(0.0001, volume), now + Math.min(0.035, duration * 0.2));
+    envelope.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    oscillator.connect(envelope);
+    envelope.connect(destination);
+    oscillator.onended = () => {
+      oscillator.disconnect();
+      envelope.disconnect();
+    };
+    oscillator.start(now);
+    oscillator.stop(now + duration + 0.02);
+  }
+
+  function playSfx(name, rewardAmount = 0) {
+    const settings = audioSettings();
+    if (settings.audioMuted || !settings.soundEffects || !ensureAudio()) return;
+    if (audioContext.state !== "running") {
+      audioContext.resume()
+        .then(() => playSfx(name, rewardAmount))
+        .catch((error) => console.warn("QUESTAR audio could not start.", error));
+      return;
+    }
+    const now = audioContext.currentTime;
+    if ((recentSounds.get(name) || 0) > now) return;
+    recentSounds.set(name, now + 0.09);
+    const notes = (frequencies, duration, waveform = "sine", volume = 0.16, gap = 0.075) => {
+      frequencies.forEach((frequency, index) => playTone(frequency, duration, volume, waveform, effectsGain, index % 2 ? 5 : -5));
+      if (frequencies.length > 1 && gap > 0) {
+        frequencies.slice(1).forEach((frequency, index) => {
+          window.setTimeout(() => playTone(frequency, duration, volume * 0.72, waveform, effectsGain, 3), (index + 1) * gap * 1000);
+        });
+      }
+    };
+    if (name === "select") playTone(680, 0.075, 0.1, "sine", effectsGain);
+    else if (name === "correct") notes([523.25, 659.25, 783.99], 0.32, "sine", 0.18, 0.085);
+    else if (name === "wrong") notes([220, 196], 0.42, "triangle", 0.14, 0.1);
+    else if (name === "next") notes([392, 523.25], 0.2, "sine", 0.12, 0.06);
+    else if (name === "quest") notes([392, 523.25, 659.25, 783.99], 0.42, "triangle", 0.13, 0.09);
+    else if (name === "coin") {
+      const pitch = rewardAmount >= 20 ? [659.25, 783.99, 987.77, 1174.66] : [783.99, 987.77];
+      notes(pitch, 0.24, "sine", rewardAmount >= 20 ? 0.16 : 0.11, 0.065);
+    } else if (name === "achievement") notes([523.25, 659.25, 783.99, 1046.5], 0.48, "triangle", 0.16, 0.1);
+    else if (name === "victory") notes([392, 493.88, 587.33, 783.99], 0.68, "triangle", 0.2, 0.12);
+    else if (name === "defeat") notes([293.66, 246.94, 196], 0.48, "triangle", 0.14, 0.12);
+    else if (name === "complete") notes([523.25, 659.25, 783.99], 0.48, "sine", 0.16, 0.12);
+  }
+
+  function musicTrackForScreen(nextScreen) {
+    if (nextScreen === "battle") return "battle";
+    if (nextScreen === "victory") return "victory";
+    if (nextScreen === "defeat") return "defeat";
+    if (["stories", "story-read", "quest", "categories", "difficulty", "completion"].includes(nextScreen)) return "exploration";
+    if (["mode-select"].includes(nextScreen)) return "quiz";
+    return "menu";
+  }
+
+  function stopMusicTrack() {
+    if (musicTimer) window.clearInterval(musicTimer);
+    musicTimer = null;
+    if (musicTrackGain && audioContext) {
+      const fadingTrack = musicTrackGain;
+      const now = audioContext.currentTime;
+      fadingTrack.gain.cancelScheduledValues(now);
+      fadingTrack.gain.setValueAtTime(fadingTrack.gain.value, now);
+      fadingTrack.gain.linearRampToValueAtTime(0.0001, now + 0.8);
+      window.setTimeout(() => fadingTrack.disconnect(), 900);
+    }
+    musicTrackGain = null;
+    activeMusicTrack = "";
+  }
+
+  function playMusicBeat(trackName) {
+    const track = AUDIO_TRACKS[trackName];
+    if (!track || !musicTrackGain) return;
+    const beat = musicBeat++;
+    const rootNote = track.notes[Math.floor(beat / 4) % track.notes.length];
+    const beatSeconds = track.tempo / 1000;
+    playTone(rootNote, Math.min(beatSeconds * 1.85, 3.2), trackName === "battle" ? 0.055 : 0.035, "triangle", musicTrackGain);
+    if (beat % 2 === 0) {
+      const interval = track.intervals[Math.floor(beat / 4) % track.intervals.length];
+      playTone(rootNote * interval, Math.min(beatSeconds * 1.7, 3.2), 0.025, "sine", musicTrackGain);
+      playTone(track.melody[beat % track.melody.length], trackName === "battle" ? 0.38 : 0.72, 0.024, "sine", musicTrackGain);
+    }
+    if (trackName === "battle" && beat % 4 === 0) {
+      const now = audioContext.currentTime;
+      const drum = audioContext.createOscillator();
+      const envelope = audioContext.createGain();
+      drum.type = "sine";
+      drum.frequency.setValueAtTime(105, now);
+      drum.frequency.exponentialRampToValueAtTime(42, now + 0.18);
+      envelope.gain.setValueAtTime(0.0001, now);
+      envelope.gain.linearRampToValueAtTime(0.075, now + 0.015);
+      envelope.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+      drum.connect(envelope);
+      envelope.connect(musicTrackGain);
+      drum.onended = () => { drum.disconnect(); envelope.disconnect(); };
+      drum.start(now);
+      drum.stop(now + 0.22);
+    }
+  }
+
+  function syncMusic(nextScreen) {
+    if (!audioContext) return;
+    applyAudioVolumes();
+    const settings = audioSettings();
+    const targetTrack = !settings.audioMuted && settings.backgroundMusic ? musicTrackForScreen(nextScreen) : "";
+    if (targetTrack === activeMusicTrack) return;
+    stopMusicTrack();
+    if (!targetTrack || audioContext.state !== "running") return;
+    const track = AUDIO_TRACKS[targetTrack];
+    musicTrackGain = audioContext.createGain();
+    musicTrackGain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+    musicTrackGain.gain.linearRampToValueAtTime(1, audioContext.currentTime + 0.8);
+    musicTrackGain.connect(musicGain);
+    activeMusicTrack = targetTrack;
+    musicBeat = 0;
+    playMusicBeat(targetTrack);
+    musicTimer = window.setInterval(() => playMusicBeat(targetTrack), track.tempo);
+  }
+
   function save() {
     const profile = currentProfile();
     if (profile) profile.activeGame = game && !game.terminal ? game : null;
@@ -222,6 +435,14 @@
       button.disabled = !profile;
       button.title = profile ? button.title : "Create or choose a local profile first";
     });
+    if (soundToggle) {
+      const effectsEnabled = profile ? !profile.settings.audioMuted : true;
+      soundToggle.disabled = !profile;
+      soundToggle.textContent = effectsEnabled ? "🔊" : "🔇";
+      soundToggle.setAttribute("aria-label", effectsEnabled ? "Mute all audio" : "Enable all audio");
+      soundToggle.title = profile ? (effectsEnabled ? "Mute all audio" : "Enable all audio") : "Choose a profile to manage sound";
+      soundToggle.setAttribute("aria-pressed", String(effectsEnabled));
+    }
   }
 
   function showToast(message) {
@@ -286,6 +507,7 @@
     document.documentElement.classList.toggle("no-animations", Boolean(settings && (!settings.animations || settings.reducedMotion)));
     root.innerHTML = renderer();
     if (screen === "battle") startTimer();
+    syncMusic(screen);
   }
 
   function renderOpening() {
@@ -358,6 +580,18 @@
         <button class="card tile" type="button" data-action="achievements"><span class="card-icon">🏅</span><h3>Achievements</h3><p>Celebrate milestones earned through practice.</p></button>
         <button class="card tile" type="button" data-action="leaderboard"><span class="card-icon">🏆</span><h3>Leaderboard & Barkada</h3><p>Explore clearly labeled offline sample rankings and a local group challenge.</p></button>
       </div>
+      <section class="panel panel-pad menu-audio" data-audio-controls aria-labelledby="menu-audio-title">
+        <div class="row spread"><div><div class="eyebrow">Personalize your adventure</div><h2 id="menu-audio-title">Sound & Music</h2></div><button class="btn btn-small" type="button" data-action="toggle-sound" aria-label="${p.settings.audioMuted ? "Enable" : "Mute"} all audio">${p.settings.audioMuted ? "🔇 Muted" : "🔊 Sound on"}</button></div>
+        <div class="row audio-toggles">
+          <label class="check-line"><input type="checkbox" name="soundEffects" data-audio-preference ${p.settings.soundEffects ? "checked" : ""}> Sound effects</label>
+          <label class="check-line"><input type="checkbox" name="backgroundMusic" data-audio-preference ${p.settings.backgroundMusic ? "checked" : ""}> Background music</label>
+        </div>
+        <div class="field-grid audio-volume-grid">
+          ${volumeField("Master volume", "masterVolume", p.settings.masterVolume)}
+          ${volumeField("Effects volume", "effectsVolume", p.settings.effectsVolume)}
+          ${volumeField("Music volume", "musicVolume", p.settings.musicVolume)}
+        </div>
+      </section>
       <div class="actions"><button class="btn" type="button" data-action="settings">⚙ Settings</button><button class="btn btn-quiet" type="button" data-action="entry">Switch profile</button></div>
     </section>`;
   }
@@ -638,6 +872,16 @@
     const s = p.settings;
     return `<section class="screen"><div class="eyebrow">Make the realm comfortable</div><h1 class="serif">Settings</h1>
       <form id="settings-form" class="panel panel-pad stack">
+        <h2>Sound & music</h2>
+        <label class="check-line"><input type="checkbox" name="soundEffects" ${s.soundEffects ? "checked" : ""}> Sound effects</label>
+        <label class="check-line"><input type="checkbox" name="backgroundMusic" ${s.backgroundMusic ? "checked" : ""}> Background music</label>
+        <div class="field-grid audio-volume-grid">
+          ${volumeField("Master volume", "masterVolume", s.masterVolume)}
+          ${volumeField("Sound effects volume", "effectsVolume", s.effectsVolume)}
+          ${volumeField("Music volume", "musicVolume", s.musicVolume)}
+        </div>
+        <p class="field-help">Original synthesized fantasy audio starts after your first interaction. Your sound preferences are saved with this local profile.</p>
+        <div class="divider"></div>
         <h2>Accessibility & display</h2>
         <label class="check-line"><input type="checkbox" name="animations" ${s.animations ? "checked" : ""}> Enable subtle animations</label>
         <label class="check-line"><input type="checkbox" name="reducedMotion" ${s.reducedMotion ? "checked" : ""}> Prefer reduced motion</label>
@@ -663,6 +907,11 @@
 
   function rewardField(label, name, value) {
     return `<div class="field"><label for="reward-${name}">${label} · coins</label><input id="reward-${name}" name="${name}" type="number" min="0" max="1000" value="${value}" required></div>`;
+  }
+
+  function volumeField(label, name, value) {
+    const percent = Math.round(value * 100);
+    return `<div class="field"><label for="${name}">${label} · <output id="${name}-value" for="${name}">${percent}%</output></label><input id="${name}" name="${name}" type="range" min="0" max="1" step="0.05" value="${value}"></div>`;
   }
 
   const DEMO_PLAYERS = [
@@ -708,6 +957,19 @@
     return game?.questions[game.questionIndex] || null;
   }
 
+  function reportLearningActivity(type, values = {}) {
+    window.dispatchEvent(new CustomEvent("questar:activity", {
+      detail: {
+        type,
+        mode: Object.prototype.hasOwnProperty.call(values, "mode") ? values.mode : game?.mode || null,
+        score: Number.isFinite(values.score) ? values.score : null,
+        coins: Number.isInteger(values.coins) ? values.coins : null,
+        durationSeconds: Number.isInteger(values.durationSeconds) ? values.durationSeconds : null,
+        details: values.details || {}
+      }
+    }));
+  }
+
   function shuffled(items) {
     const result = items.slice();
     for (let index = result.length - 1; index > 0; index -= 1) {
@@ -732,7 +994,9 @@
       wasCorrect: false,
       feedback: ""
     }));
-    game = { mode: "basa", storyId, questions: q, questionIndex: 0, health: 2, maxHealth: 2, lives: 3, earned: [], correctCount: 0, terminal: false, category: "" };
+    game = { mode: "basa", storyId, questions: q, questionIndex: 0, health: 2, maxHealth: 2, lives: 3, earned: [], correctCount: 0, terminal: false, category: "", startedAt: Date.now() };
+    reportLearningActivity("quiz_attempted", { mode: "basa" });
+    playSfx("quest");
     const profile = currentProfile();
     claimReward(`read:${story.id}`, profile.settings.rewards.reading, "Reading completion", game);
     save();
@@ -746,7 +1010,9 @@
       showToast("A challenge could not be validated. Please choose another category.");
       return;
     }
-    game = { mode: "math", category, questions, questionIndex: 0, health: 3, maxHealth: 3, lives: null, monsterName: randomMonster(), monsterIcon: "🐲", earned: [], correctCount: 0, terminal: false };
+    game = { mode: "math", category, questions, questionIndex: 0, health: 3, maxHealth: 3, lives: null, monsterName: randomMonster(), monsterIcon: "🐲", earned: [], correctCount: 0, terminal: false, startedAt: Date.now() };
+    reportLearningActivity("quiz_attempted", { mode: "math" });
+    playSfx("quest");
     currentProfile().currentStreak = currentProfile().currentStreak || 0;
     save();
     go("battle");
@@ -786,6 +1052,7 @@
   function selectAnswer(id) {
     const question = currentQuestion();
     if (!question || question.submitted || !question.choices.some((choice) => choice.id === id)) return;
+    if (question.selectedId !== id) playSfx("select");
     question.selectedId = id;
     save();
     render();
@@ -800,6 +1067,10 @@
     clearTimer();
     question.submitted = true;
     question.wasCorrect = !timedOut && question.selectedId === question.correctId;
+    playSfx(question.wasCorrect ? "correct" : "wrong");
+    reportLearningActivity(question.wasCorrect ? "answer_correct" : "answer_incorrect", {
+      score: question.wasCorrect ? currentProfile().score + 10 : currentProfile().score
+    });
     profile.totalAnswers += 1;
     if (question.wasCorrect) {
       game.correctCount += 1;
@@ -875,6 +1146,7 @@
       go("defeat");
       return;
     }
+    playSfx("next");
     game.timeLeft = undefined;
     save();
     render();
@@ -887,6 +1159,8 @@
     profile.claimedRewards.push(id);
     profile.coins = Math.max(0, profile.coins + reward);
     if (activeGame) activeGame.earned.push({ id, amount: reward, label });
+    reportLearningActivity("coins_earned", { coins: reward });
+    playSfx("coin", reward);
     return reward;
   }
 
@@ -896,6 +1170,8 @@
       if (!profile.achievements.includes(achievement.id) && achievement.test(profile)) {
         profile.achievements.push(achievement.id);
         claimReward(`achievement:${achievement.id}`, profile.settings.rewards.achievement, `achievement: ${achievement.title}`, game);
+        reportLearningActivity("achievement_unlocked", { details: { achievement_id: achievement.id } });
+        playSfx("achievement");
         showToast(`Achievement unlocked: ${achievement.title}`);
       }
     }
@@ -904,6 +1180,7 @@
   function finishVictory() {
     if (!game || game.victoryHandled) return;
     game.victoryHandled = true;
+    playSfx("victory");
     const profile = currentProfile();
     const activityId = game.mode === "basa" ? game.storyId : game.category.toLowerCase().replace(/[^a-z0-9]+/g, "-");
     profile.completedQuests = [...new Set([...profile.completedQuests, `${game.mode}:${activityId}`])];
@@ -914,13 +1191,23 @@
     claimReward(`monster:${game.mode}:${activityId}`, profile.settings.rewards.monster, "monster defeat", game);
     unlockAchievements();
     profile.activeGame = null;
+    const durationSeconds = Number.isFinite(game.startedAt)
+      ? Math.max(0, Math.floor((Date.now() - game.startedAt) / 1000))
+      : null;
+    reportLearningActivity("quiz_completed", { score: game.correctCount, durationSeconds });
+    reportLearningActivity(game.mode === "basa" ? "reading_completed" : "math_completed", { durationSeconds });
+    reportLearningActivity("quest_completed", { durationSeconds, details: { activity_id: activityId } });
   }
 
   function finishDefeat() {
-    if (game) currentProfile().activeGame = null;
+    if (game) {
+      playSfx("defeat");
+      currentProfile().activeGame = null;
+    }
   }
 
   function continueVictory() {
+    playSfx("complete");
     screen = "completion";
     const mode = game?.mode;
     game = null;
@@ -1065,10 +1352,26 @@
 
   let selectedAvatarForForm = AVATARS[0];
 
+  document.addEventListener("pointerdown", unlockAudio, { once: true });
+  document.addEventListener("keydown", unlockAudio, { once: true });
+
   document.addEventListener("click", (event) => {
     const target = event.target.closest("[data-action]");
     if (!target) return;
+    unlockAudio();
     const action = target.dataset.action;
+    if (action === "toggle-sound") {
+      const profile = currentProfile();
+      if (!profile) return;
+      profile.settings.audioMuted = !profile.settings.audioMuted;
+      save();
+      applyAudioVolumes();
+      if (!profile.settings.audioMuted) playSfx("select");
+      return;
+    }
+    if (!["select-choice", "submit-answer", "next-question", "start-basa", "start-math", "retry", "continue-victory"].includes(action)) {
+      playSfx("select");
+    }
     if (action === "home" || action === "opening") go("opening");
     else if (action === "entry") go("entry");
     else if (action === "new-profile") { selectedAvatarForForm = AVATARS[0]; go("create-profile"); }
@@ -1079,7 +1382,7 @@
     else if (action === "resume-battle") { if (game) go("battle"); else go("mode-select"); }
     else if (action === "quest") { questChoice = ""; go("quest"); }
     else if (action === "quest-choice") { questChoice = target.dataset.choice; render(); }
-    else if (action === "quest-continue") { currentProfile().completedQuests = [...new Set([...currentProfile().completedQuests, "quest:moonlit-classroom"] )]; save(); go("mode-select"); }
+    else if (action === "quest-continue") { currentProfile().completedQuests = [...new Set([...currentProfile().completedQuests, "quest:moonlit-classroom"] )]; reportLearningActivity("quest_completed", { mode: null, details: { activity_id: "moonlit-classroom" } }); save(); go("mode-select"); }
     else if (action === "mode-select") go("mode-select");
     else if (action === "choose-mode") { pendingMode = target.dataset.mode; go("difficulty"); }
     else if (action === "set-difficulty") {
@@ -1108,6 +1411,19 @@
     else if (action === "barkada") go("barkada");
     else if (action === "group-battle") startGroupBattle();
     else if (action === "reset") resetProgress();
+  });
+
+  document.addEventListener("input", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || !["masterVolume", "effectsVolume", "musicVolume"].includes(input.name)) return;
+    const output = document.getElementById(`${input.name}-value`);
+    if (output) output.value = `${Math.round(Number(input.value) * 100)}%`;
+    if (input.closest("[data-audio-controls]")) saveMenuAudioPreference(input);
+  });
+
+  document.addEventListener("change", (event) => {
+    const input = event.target;
+    if (input instanceof HTMLInputElement && input.hasAttribute("data-audio-preference")) saveMenuAudioPreference(input);
   });
 
   document.addEventListener("submit", (event) => {
@@ -1162,6 +1478,7 @@
     const data = new FormData(form);
     const p = currentProfile();
     const numberField = (name, min, max) => Math.min(max, Math.max(min, Math.floor(Number(data.get(name)) || 0)));
+    const volumeFieldValue = (name, fallback) => clampVolume(Number(data.get(name)), fallback);
     p.settings.rewards = {
       reading: numberField("reading", 0, 1000),
       basaCorrect: numberField("basaCorrect", 0, 1000),
@@ -1175,9 +1492,31 @@
     p.settings.animations = data.has("animations");
     p.settings.reducedMotion = data.has("reducedMotion");
     p.settings.largeText = data.has("largeText");
+    p.settings.soundEffects = data.has("soundEffects");
+    p.settings.backgroundMusic = data.has("backgroundMusic");
+    p.settings.masterVolume = volumeFieldValue("masterVolume", DEFAULT_SETTINGS.masterVolume);
+    p.settings.effectsVolume = volumeFieldValue("effectsVolume", DEFAULT_SETTINGS.effectsVolume);
+    p.settings.musicVolume = volumeFieldValue("musicVolume", DEFAULT_SETTINGS.musicVolume);
     save();
+    applyAudioVolumes();
+    syncMusic(screen);
     showToast("Settings saved and applied.");
     render();
+  }
+
+  function saveMenuAudioPreference(input) {
+    const profile = currentProfile();
+    if (!profile) return;
+    if (input.name === "soundEffects" || input.name === "backgroundMusic") {
+      profile.settings[input.name] = input.checked;
+    } else if (["masterVolume", "effectsVolume", "musicVolume"].includes(input.name)) {
+      profile.settings[input.name] = clampVolume(Number(input.value), DEFAULT_SETTINGS[input.name]);
+    } else {
+      return;
+    }
+    save();
+    applyAudioVolumes();
+    syncMusic(screen);
   }
 
   function resetProgress() {

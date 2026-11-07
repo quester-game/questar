@@ -1,8 +1,8 @@
 # QUESTAR — Learning Adventure
 
-QUESTAR is a self-contained, fantasy-themed educational web app for reading comprehension and mathematics. It combines original short stories, monster battles, supportive feedback, configurable rewards, achievements, and a shared local coin wallet in one application.
+QUESTAR is a fantasy-themed educational web app for reading comprehension and mathematics. It combines original short stories, monster battles, supportive feedback, configurable rewards, achievements, and a shared local coin wallet. Guest gameplay is static and offline-friendly; optional Supabase accounts and the restricted admin console require an online deployment and project configuration.
 
-The project is a static website made with HTML, CSS, and vanilla JavaScript. Core gameplay has no backend, package installation, external API, externally hosted image, or required internet connection. It is suitable for local play and GitHub Pages.
+The project is a static website made with HTML, CSS, and vanilla JavaScript. Core gameplay has no required backend, package installation, externally hosted image, or internet connection. The optional account and admin features use Supabase Auth/Postgres and the Supabase JavaScript client loaded from a CDN.
 
 ## Educational purpose
 
@@ -38,22 +38,25 @@ The following figures were supplied in the project brief and are presented as pr
 
 ```text
 questar-educational-game/
-├── index.html    # App shell and references the stylesheet and script
-├── style.css     # Responsive visual design and accessibility states
-├── script.js     # Screens, game rules, questions, rewards, and local saving
-└── README.md     # Setup, usage, publishing, and prototype limitations
+├── index.html / style.css / script.js        # Offline-capable game
+├── account.html / account.js                 # Student Supabase Auth
+├── student-session.js                         # Session heartbeat and activity events
+├── admin.html / admin.css / admin.js          # Restricted admin console
+├── reset-password.html / reset-password.js    # Auth recovery flow
+├── supabase-config.js                         # Public project URL and anon key only
+├── supabase/migrations/                       # RLS schema and protected RPCs
+├── supabase/functions/                        # Server-side account management
+└── README.md                                  # Setup, privacy, and limitations
 ```
 
-`index.html` links `style.css` with a relative stylesheet link and loads `script.js` using `defer`. The JavaScript renders the single-page application inside `#app-root`. All four files belong together in the same folder and repository root.
+`index.html` links the game stylesheet and classic script and loads the optional student-session module. All static pages and their assets belong together in the repository root.
 
 ## Local setup
 
-1. Create a folder named `questar-educational-game`.
-2. Create these four files inside it: `index.html`, `style.css`, `script.js`, and `README.md`.
-3. Put each corresponding source file's content in its own file. Do not paste the contents of one file into another.
-4. Save all four files, then open `index.html` in a current desktop or mobile browser.
-5. Choose **Create a local profile** or **Guest Login — No Internet**.
-6. Open **Choose a Learning Mode**, choose BASA or MATH, then select a difficulty.
+1. Keep the repository files in the same folder structure.
+2. Open `index.html` in a current desktop or mobile browser for offline guest play, or serve the folder over HTTP locally.
+3. Choose **Create a local profile** or **Guest Login — No Internet**.
+4. Open **Choose a Learning Mode**, choose BASA or MATH, then select a difficulty.
 
 No dependencies need to be installed. If a browser restricts local storage for a directly opened file, use a simple local development server instead. For example, with Python installed, open a terminal in the project folder and run:
 
@@ -61,7 +64,7 @@ No dependencies need to be installed. If a browser restricts local storage for a
 python -m http.server 8000
 ```
 
-Then open `http://localhost:8000`. Python is only needed for this optional local server, not by the website itself.
+Then open `http://localhost:8000`. Python is only needed for this optional local server, not by the game itself. Supabase sign-in requires a hosted HTTP(S) origin listed in the project's Auth redirect allowlist; a directly opened `file://` page cannot provide it.
 
 ### Troubleshooting
 
@@ -135,12 +138,52 @@ No separate automated test framework is included. In-browser smoke checks were r
 - [x] Desktop/tablet/mobile viewport checks reported no horizontal overflow.
 - [ ] Keyboard-only pass, manual visual review, and browser-console review.
 
+## Supabase accounts and secure admin console
+
+The static game remains playable offline with browser-local profiles. For real accounts and monitoring, this repository now includes a separate Supabase-backed account flow and restricted admin console:
+
+- `account.html` creates or signs into email/password student accounts. It never accepts a role field; all new accounts are students.
+- `admin.html` is not linked from the student navigation. Visiting it directly does not grant access: the database checks the administrator grant on every privileged RPC, and non-admin users are signed out and redirected.
+- `supabase/migrations/20261107000100_admin_monitoring.sql` defines protected profiles, explicit administrator grants, expiring heartbeat sessions, activity events, audit logs, RLS, and admin-only RPCs.
+- `supabase/functions/admin-account-action/` performs password reset, account deletion, and Auth bans server-side. The service-role key is only available to the Edge Function and must never be copied into browser files.
+- Authenticated students' game sessions send activity events to the database. Session presence expires after two minutes without a heartbeat and is not inferred from past logins.
+
+### Configure a Supabase project
+
+1. Create a Supabase project and enable email/password authentication. Configure email confirmation, a strong password policy, and Auth rate limits appropriate for students.
+2. In Authentication → URL Configuration, set the site URL and allow the deployed URLs for `account.html`, `reset-password.html`, and the account confirmation callback.
+3. Apply the migration using the Supabase CLI (`supabase link --project-ref YOUR_PROJECT_REF`, then `supabase db push`) or run the migration SQL in the Supabase SQL Editor.
+4. Copy only the project URL and **public anon/publishable key** into `supabase-config.js`. This key is designed for browser use; database access remains restricted by RLS. Never place a service-role key, database password, or private API key in this file.
+5. Register your first account at `account.html`, confirm its email, then grant it administrator status from the trusted Supabase SQL Editor. Replace the email with the exact verified account email:
+
+   ```sql
+   insert into public.admin_users (user_id)
+   select id from auth.users where lower(email) = lower('admin@example.org')
+   on conflict (user_id) do nothing;
+   ```
+
+   Only a trusted project owner should run this bootstrap query. Adding or removing admins is deliberately not available to students or through the dashboard. Additional admin grants should be reviewed and performed through the protected database console.
+6. Deploy `supabase/functions/admin-account-action/` with JWT verification enabled. Set the Edge Function secrets `ADMIN_ALLOWED_ORIGINS` (comma-separated exact trusted site origins, such as `https://example.org`) and `APP_SITE_URL` (the site origin). Supabase supplies its project URL and keys to Edge Functions; verify the service-role secret exists only in the Edge Function environment.
+7. Open `admin.html`, sign in with the granted account, and verify a regular student account is redirected without returning admin data. Test suspension, reactivation, password-reset email, and deletion only with test accounts.
+
+The migration deliberately grants no browser access to the administrator-grant, session, activity, or audit tables. Use only the protected RPCs and Edge Function. Password reset uses Supabase's configured email provider and the `reset-password.html` recovery page.
+
+### Monitoring scope and data integrity
+
+- Online status means an authenticated account has an unexpired heartbeat session (two-minute expiry); the student app refreshes it every 30 seconds. Closing a tab may take up to two minutes to show offline.
+- Supabase account details, email, account status, admin role, and auth sign-in time come from the database/Auth provider. The console never displays passwords, hashes, or tokens.
+- Learning events are recorded against the currently signed-in Supabase account, but the existing game still keeps its wallet, answers, and local profiles in `localStorage`. Learning events, scores, coins, and level reports are therefore **client-reported monitoring data**, not tamper-proof grades or authoritative balances. A production grading/rewards system must move scoring and rewards to server-validated game APIs before using these figures for decisions.
+- Local profiles created before Supabase setup are not automatically migrated or linked to an email account. A student must create/sign into a Supabase account to have future authenticated session and game activity events associated with it.
+- Failed sign-in attempts and suspicious Auth events remain in Supabase Auth's security logs; the app dashboard does not claim to expose those provider logs. Review them in the Supabase project console.
+- Admin role grants are provisioned by a trusted project owner. Student-controlled metadata cannot grant administrator access. Admin account status changes, profile edits, resets, deletions, and role grants have protected audit records.
+- Supabase is an internet service, so these account and admin features require a network connection. Guest gameplay remains local and offline.
+
 ## Known limitations and production requirements
 
 - Guest mode and core gameplay work offline, but browser storage is not a backup and may be cleared.
 - Local profiles are prototypes, not secure accounts. Do not store passwords in `localStorage`.
-- There is no real login, identity verification, account recovery, cross-device synchronization, live leaderboard, shared classroom data, tutor connection, or online multiplayer.
+- Local browser profiles are not authenticated accounts and do not provide identity verification, password recovery, or cross-device synchronization. Supabase email/password auth is available only after project setup above.
 - The leaderboard and group battle use sample records and a local simulation only.
 - Local JavaScript checks improve prototype behavior but can be modified by a user; they are not production security. A competitive or shared release must validate scores, question submissions, reward claims, and balances server-side.
-- Production authentication requires an appropriate authentication service or backend. Any student data collection or sharing must be minimized and designed with appropriate privacy protections.
-- No internet-hosted image, font, API, or service is required for core gameplay.
+- Student data collection and retention must be reviewed for applicable school, guardian-consent, and privacy requirements before deployment.
+- Core guest gameplay needs no internet service; configured Supabase accounts and administrator monitoring do.

@@ -1,0 +1,4 @@
+project_id = "questar"
+
+[functions.admin-account-action]
+verify_jwt = true
